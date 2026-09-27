@@ -30,4 +30,3 @@ esp_err_t sensors_read_mag(sensors_t *sensors, qmc5883p_sample_t *sample,
                            bool *data_ready);
 void sensors_apply_axis_map(const float input[3], const int8_t map[3],
                             float output[3]);
-

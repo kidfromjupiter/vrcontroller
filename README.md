@@ -1,18 +1,17 @@
-# VR Controller Orientation Filter
+# VR Controller Orientation Tracker
 
 ESP-IDF firmware for an ESP32-C3, MPU6050, and QMC5883P. It calibrates the
 sensors and performs Madgwick orientation fusion at 100 Hz. The filter uses
 9-DOF updates while valid magnetometer samples are available and falls back to
-6-DOF updates when they are not.
-
-> **Current test mode:** The sensor application is temporarily disabled with
-> `#if 0` in `main/vrcontroller.c`. The active `app_main()` sends the
-> null-terminated string `Hello world!` to the ESP-NOW peer once per second.
+6-DOF updates when they are not. It sends the resulting orientation and
+acceleration to the `vrrecv` receiver over ESP-NOW.
 
 ## Hardware defaults
 
 - SDA: GPIO 8
 - SCL: GPIO 9
+- Magnetometer calibration LED: GPIO 5 (active high)
+- Magnetometer calibration boot trigger: GPIO 7 (active high, internal pull-down)
 - MPU6050: address 0x68 or 0x69
 - QMC5883P: address 0x2c
 
@@ -26,49 +25,43 @@ console before the first boot. With no calibration in NVS, the firmware starts
 a guided sequence for stationary gyro bias, six-face accelerometer calibration,
 and figure-eight magnetometer calibration. A valid result is saved to NVS.
 
-On later boots, enter `c` during the three-second startup prompt to recalibrate.
-If optional recalibration fails, the last valid calibration remains active.
+On later boots, enter `c` during the three-second startup prompt to run the
+complete calibration wizard, or enter `m` to repeat only the figure-eight
+magnetometer calibration while preserving the saved gyro and accelerometer
+calibration. If optional recalibration fails, the last valid calibration
+remains active.
 
-## ESP-NOW hello-world test
+Alternatively, hold GPIO 7 high continuously for two seconds from boot to go
+directly into magnetometer-only calibration. This shortcut requires an existing
+saved calibration; first boot still runs the complete calibration wizard.
 
-The active program sends `Hello world!` once per second. The packet is 13 bytes:
-12 visible characters followed by the null byte (`\0`) that ends a C string.
+## ESP-NOW protocol
+
 The receiver's station MAC address is `34:b7:da:fb:23:f8` in
-`main/vrcontroller.c`. Both ESP32 devices must use channel 1, configured by
+`main/vrcontroller.c`. Both devices use channel 1, configured by
 `TRACKER_ESPNOW_CHANNEL` in `main/tracker_config.h`.
 
-`esp_now_send()` only starts a transmission. Its return value says whether
-ESP-IDF accepted the request; the later send callback says whether the peer
-acknowledged it. The active program waits for that callback, prints the result,
-then sends again after one second.
+Each sample is a 24-byte version 1 packet in little-endian order:
 
-The current `vrrecv` firmware will acknowledge this message, so the sender's
-`ok` counter should increase, but its quaternion-only callback discards the
-13-byte string. To display the message on the receiver during this test, its
-receive callback can temporarily use:
+| Offset | Size | Field |
+| --- | ---: | --- |
+| 0 | 1 | Packet ID (`1`) |
+| 1 | 1 | Protocol version (`1`) |
+| 2 | 2 | Sequence number |
+| 4 | 4 | Low 32 bits of the microsecond sample timestamp |
+| 8 | 8 | Quaternion W, X, Y, Z as four signed 16-bit values |
+| 16 | 6 | Acceleration X, Y, Z as three signed 16-bit values |
+| 22 | 2 | Status flags (currently zero) |
 
-```c
-#include "esp_now.h"
-#include "esp_log.h"
+Quaternion values use 32767 counts per unit. Acceleration uses 2048 counts per
+g and is calibrated and mapped into the same body axes used by the orientation
+filter. Scaled values are rounded to the nearest integer and saturated to the
+signed 16-bit range.
 
-static void espnow_receive_cb(const esp_now_recv_info_t *info,
-                              const uint8_t *data, int data_len)
-{
-    (void)info;
-
-    /* The sender includes '\0', so this packet is safe to print as a string. */
-    if (data_len == 13 && data[12] == '\0') {
-        ESP_LOGI("recv", "Received: %s", (const char *)data);
-    }
-}
-
-/* Register after starting Wi-Fi and calling esp_now_init(). */
-ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_receive_cb));
-```
-
-Printing inside the Wi-Fi callback is acceptable for this slow one-message-per-
-second test. For high-rate sensor data, copy packets to a FreeRTOS queue and
-process them from a normal task instead.
+`esp_now_send()` starts an asynchronous transmission. The firmware allows only
+one pending send at a time and uses its callback to count acknowledged and
+failed transmissions. The packet sequence advances when the Wi-Fi stack
+accepts a send request, so gaps can identify packets lost after submission.
 
 ## Build and test
 
@@ -77,6 +70,6 @@ be run with:
 
 ```sh
 cc -std=c11 -D_GNU_SOURCE -Imain tests/test_tracker.c \
-  main/madgwick.c -lm -o /tmp/vrcontroller_test
+  main/madgwick.c main/tracker_protocol.c -lm -o /tmp/vrcontroller_test
 /tmp/vrcontroller_test
 ```

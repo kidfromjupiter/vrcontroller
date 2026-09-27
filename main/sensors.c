@@ -136,14 +136,28 @@ esp_err_t sensors_init(sensors_t *sensors)
                                   BIT(7)), TAG, "QMC5883P reset failed");
     vTaskDelay(pdMS_TO_TICKS(10));
     ESP_RETURN_ON_ERROR(write_reg(sensors->qmc5883p, QMC5883P_REG_CTRL2,
-                                  QMC5883P_CTRL2_VALUE), TAG,
-                        "QMC5883P range setup failed");
+                                  0x00), TAG,
+                        "QMC5883P reset release failed");
+    vTaskDelay(pdMS_TO_TICKS(20));
     ESP_RETURN_ON_ERROR(write_reg(sensors->qmc5883p, QMC5883P_REG_CTRL1,
                                   QMC5883P_CTRL1_VALUE), TAG,
                         "QMC5883P mode setup failed");
+    ESP_RETURN_ON_ERROR(write_reg(sensors->qmc5883p, QMC5883P_REG_CTRL2,
+                                  QMC5883P_CTRL2_VALUE), TAG,
+                        "QMC5883P range setup failed");
+    vTaskDelay(pdMS_TO_TICKS(10));
+    uint8_t ctrl2 = 0;
+    ESP_RETURN_ON_ERROR(read_regs(sensors->qmc5883p, QMC5883P_REG_CTRL2,
+                                  &ctrl2, 1), TAG,
+                        "QMC5883P CTRL2 readback failed");
+    if ((ctrl2 & 0x0fU) != QMC5883P_CTRL2_VALUE) {
+        ESP_LOGE(TAG, "QMC5883P CTRL2 verification failed: wrote 0x%02x, read 0x%02x",
+                 QMC5883P_CTRL2_VALUE, ctrl2);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
 
-    ESP_LOGI(TAG, "MPU6050=0x%02x QMC5883P=0x%02x SDA=%d SCL=%d",
-             address, QMC5883P_ADDR, TRACKER_I2C_SDA_GPIO,
+    ESP_LOGI(TAG, "MPU6050=0x%02x QMC5883P=0x%02x CTRL2=0x%02x SDA=%d SCL=%d",
+             address, QMC5883P_ADDR, ctrl2, TRACKER_I2C_SDA_GPIO,
              TRACKER_I2C_SCL_GPIO);
     return ESP_OK;
 }
@@ -178,9 +192,10 @@ esp_err_t sensors_read_mag(sensors_t *sensors, qmc5883p_sample_t *sample,
     ESP_RETURN_ON_ERROR(read_regs(sensors->qmc5883p, QMC5883P_REG_DATA, data,
                                   sizeof(data)), TAG, "QMC5883P read failed");
     const float ut_per_lsb = 100.0f / QMC5883P_8G_LSB_PER_GAUSS;
-    sample->magnetic_ut[0] = le16(&data[0]) * ut_per_lsb;
-    sample->magnetic_ut[1] = le16(&data[2]) * ut_per_lsb;
-    sample->magnetic_ut[2] = le16(&data[4]) * ut_per_lsb;
+    for (int i = 0; i < 3; ++i) {
+        int16_t raw = le16(&data[i * 2]);
+        sample->magnetic_ut[i] = raw * ut_per_lsb;
+    }
     return ESP_OK;
 }
 

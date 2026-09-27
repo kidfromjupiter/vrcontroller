@@ -4,8 +4,10 @@ idf_component_register(
         "sensors.c"
         "calibration.c"
         "madgwick.c"
+        "tracker_protocol.c"
     INCLUDE_DIRS "."
     REQUIRES
+        esp_driver_gpio
         esp_driver_i2c
         esp_driver_uart
         esp_hal_usb

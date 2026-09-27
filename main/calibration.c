@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -15,6 +16,7 @@
 #include "hal/usb_serial_jtag_ll.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "tracker_config.h"
 
 #define CAL_MAGIC   0x56435243U
 #define CAL_VERSION 1U
@@ -81,6 +83,30 @@ bool calibration_load(tracker_calibration_t *calibration)
            valid_calibration(calibration);
 }
 
+bool calibration_magnetometer_boot_requested(void)
+{
+    const gpio_config_t button_config = {
+        .pin_bit_mask = 1ULL << TRACKER_MAG_CAL_BUTTON_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    if (gpio_config(&button_config) != ESP_OK ||
+        gpio_get_level(TRACKER_MAG_CAL_BUTTON_GPIO) == 0) {
+        return false;
+    }
+
+    int64_t start = esp_timer_get_time();
+    while (esp_timer_get_time() - start < 2000000) {
+        if (gpio_get_level(TRACKER_MAG_CAL_BUTTON_GPIO) == 0) return false;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    ESP_LOGI(TAG, "GPIO%d held high; requesting magnetometer calibration",
+             TRACKER_MAG_CAL_BUTTON_GPIO);
+    return true;
+}
+
 static esp_err_t save_calibration(const tracker_calibration_t *calibration)
 {
     nvs_handle_t handle;
@@ -126,19 +152,26 @@ static void wait_for_enter(const char *message)
     }
 }
 
-bool calibration_recalibration_requested(void)
+calibration_request_t calibration_recalibration_request(void)
 {
-    printf("Enter 'c' within 3 seconds to recalibrate sensors...\n");
+    printf("Enter 'c' within 3 seconds for full calibration, or 'm' for magnetometer-only calibration...\n");
     fflush(stdout);
     drain_input();
     int64_t end = esp_timer_get_time() + 3000000;
-    bool requested = false;
+    calibration_request_t request = CALIBRATION_REQUEST_NONE;
     while (esp_timer_get_time() < end) {
         int ch = read_console_char(pdMS_TO_TICKS(20));
-        if (ch == 'c' || ch == 'C') { requested = true; break; }
+        if (ch == 'c' || ch == 'C') {
+            request = CALIBRATION_REQUEST_FULL;
+            break;
+        }
+        if (ch == 'm' || ch == 'M') {
+            request = CALIBRATION_REQUEST_MAG_ONLY;
+            break;
+        }
     }
     drain_input();
-    return requested;
+    return request;
 }
 
 static esp_err_t average_mpu(sensors_t *sensors, int samples,
@@ -164,6 +197,85 @@ static esp_err_t average_mpu(sensors_t *sensors, int samples,
         if (gyro_sq) gyro_sq[i] /= samples;
     }
     return ESP_OK;
+}
+
+static esp_err_t capture_magnetometer(sensors_t *sensors,
+                                      tracker_calibration_t *calibration)
+{
+    const gpio_config_t led_config = {
+        .pin_bit_mask = 1ULL << TRACKER_CALIBRATION_LED_GPIO,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&led_config), TAG,
+                        "Calibration LED setup failed");
+    ESP_RETURN_ON_ERROR(gpio_set_level(TRACKER_CALIBRATION_LED_GPIO, 1), TAG,
+                        "Could not turn on calibration LED");
+
+    esp_err_t result = ESP_OK;
+    printf("Move the controller through broad figure-eights in every orientation for 30 seconds.\n"
+           "After 10 seconds, Enter may be used to finish early.\n");
+    fflush(stdout);
+    drain_input();
+    float minimum[3] = {FLT_MAX,FLT_MAX,FLT_MAX};
+    float maximum[3] = {-FLT_MAX,-FLT_MAX,-FLT_MAX};
+    int samples = 0;
+    int64_t start = esp_timer_get_time();
+    while (esp_timer_get_time() - start < 30000000) {
+        qmc5883p_sample_t sample;
+        bool ready = false;
+        if (sensors_read_mag(sensors, &sample, &ready) == ESP_OK && ready && !sample.overflow) {
+            for (int i = 0; i < 3; ++i) {
+                minimum[i] = fminf(minimum[i], sample.magnetic_ut[i]);
+                maximum[i] = fmaxf(maximum[i], sample.magnetic_ut[i]);
+            }
+            ++samples;
+        }
+        int ch = read_console_char(0);
+        if ((ch == '\n' || ch == '\r') && esp_timer_get_time() - start >= 10000000) break;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (samples < 100) {
+        ESP_LOGE(TAG, "Not enough magnetometer samples");
+        result = ESP_ERR_INVALID_STATE;
+        goto cleanup;
+    }
+    float radius_sum = 0.0f, radius[3], span[3];
+    for (int i = 0; i < 3; ++i) {
+        span[i] = maximum[i] - minimum[i];
+        calibration->mag_bias_ut[i] = (maximum[i] + minimum[i]) * 0.5f;
+        radius[i] = span[i] * 0.5f;
+        radius_sum += radius[i];
+    }
+    float average_radius = radius_sum / 3.0f;
+    for (int i = 0; i < 3; ++i) {
+        calibration->mag_scale[i] = radius[i] > 1.0e-6f
+            ? average_radius / radius[i]
+            : NAN;
+        ESP_LOGI(TAG, "Mag axis %d: min=%.2f max=%.2f span=%.2f bias=%.2f scale=%.4f",
+                 i, minimum[i], maximum[i], span[i],
+                 calibration->mag_bias_ut[i], calibration->mag_scale[i]);
+    }
+    ESP_LOGI(TAG, "Mag average radius: %.2f uT", average_radius);
+    if (average_radius < TRACKER_MAG_MIN_UT ||
+        average_radius > TRACKER_MAG_MAX_UT) {
+        ESP_LOGE(TAG, "Magnetometer average radius %.2f uT is outside %.2f-%.2f uT",
+                 average_radius, (double)TRACKER_MAG_MIN_UT,
+                 (double)TRACKER_MAG_MAX_UT);
+        result = ESP_ERR_INVALID_STATE;
+    }
+cleanup:
+    {
+        esp_err_t led_err = gpio_set_level(TRACKER_CALIBRATION_LED_GPIO, 0);
+        if (led_err != ESP_OK) {
+            ESP_LOGE(TAG, "Could not turn off calibration LED: %s",
+                     esp_err_to_name(led_err));
+            if (result == ESP_OK) result = led_err;
+        }
+    }
+    return result;
 }
 
 esp_err_t calibration_run_wizard(sensors_t *sensors,
@@ -219,49 +331,29 @@ esp_err_t calibration_run_wizard(sensors_t *sensors,
         c.accel_scale[i] = 2.0f / span;
     }
 
-    printf("Move the controller through broad figure-eights in every orientation for 30 seconds.\n"
-           "After 10 seconds, Enter may be used to finish early.\n");
-    fflush(stdout);
-    drain_input();
-    float minimum[3] = {FLT_MAX,FLT_MAX,FLT_MAX};
-    float maximum[3] = {-FLT_MAX,-FLT_MAX,-FLT_MAX};
-    int samples = 0;
-    int64_t start = esp_timer_get_time();
-    while (esp_timer_get_time() - start < 30000000) {
-        qmc5883p_sample_t sample;
-        bool ready = false;
-        if (sensors_read_mag(sensors, &sample, &ready) == ESP_OK && ready && !sample.overflow) {
-            for (int i = 0; i < 3; ++i) {
-                minimum[i] = fminf(minimum[i], sample.magnetic_ut[i]);
-                maximum[i] = fmaxf(maximum[i], sample.magnetic_ut[i]);
-            }
-            ++samples;
-        }
-        int ch = read_console_char(0);
-        if ((ch == '\n' || ch == '\r') && esp_timer_get_time() - start >= 10000000) break;
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    if (samples < 100) {
-        ESP_LOGE(TAG, "Not enough magnetometer samples");
-        return ESP_ERR_INVALID_STATE;
-    }
-    float radius_sum = 0.0f, radius[3];
-    for (int i = 0; i < 3; ++i) {
-        float span = maximum[i] - minimum[i];
-        if (span < 15.0f) {
-            ESP_LOGE(TAG, "Insufficient magnetometer movement on axis %d", i);
-            return ESP_ERR_INVALID_STATE;
-        }
-        c.mag_bias_ut[i] = (maximum[i] + minimum[i]) * 0.5f;
-        radius[i] = span * 0.5f;
-        radius_sum += radius[i];
-    }
-    float average_radius = radius_sum / 3.0f;
-    for (int i = 0; i < 3; ++i) c.mag_scale[i] = average_radius / radius[i];
+    ESP_RETURN_ON_ERROR(capture_magnetometer(sensors, &c), TAG,
+                        "Magnetometer calibration failed");
     if (!valid_calibration(&c)) return ESP_ERR_INVALID_STATE;
     ESP_RETURN_ON_ERROR(save_calibration(&c), TAG, "Calibration save failed");
     *result = c;
     ESP_LOGI(TAG, "Calibration saved");
+    return ESP_OK;
+}
+
+esp_err_t calibration_run_magnetometer(sensors_t *sensors,
+                                       const tracker_calibration_t *previous,
+                                       tracker_calibration_t *result)
+{
+    if (!valid_calibration(previous)) return ESP_ERR_INVALID_ARG;
+
+    tracker_calibration_t c = *previous;
+    printf("\nMagnetometer-only calibration\n");
+    ESP_RETURN_ON_ERROR(capture_magnetometer(sensors, &c), TAG,
+                        "Magnetometer calibration failed");
+    if (!valid_calibration(&c)) return ESP_ERR_INVALID_STATE;
+    ESP_RETURN_ON_ERROR(save_calibration(&c), TAG, "Calibration save failed");
+    *result = c;
+    ESP_LOGI(TAG, "Magnetometer calibration saved");
     return ESP_OK;
 }
 
