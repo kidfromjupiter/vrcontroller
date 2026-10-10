@@ -7,12 +7,15 @@
 #include "esp_err.h"
 
 typedef struct {
+    int16_t raw_accel[3];
+    int16_t raw_gyro[3];
     float accel_g[3];
     float gyro_dps[3];
     float temperature_c;
 } mpu6050_sample_t;
 
 typedef struct {
+    int16_t raw_magnetic[3];
     float magnetic_ut[3];
     bool overflow;
 } qmc5883p_sample_t;

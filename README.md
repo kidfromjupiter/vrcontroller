@@ -17,6 +17,21 @@ acceleration to the `vrrecv` receiver over ESP-NOW.
 Change these values, the Madgwick beta, or either sensor's signed axis map in
 `main/tracker_config.h`.
 
+## Raw sensor values over serial
+
+The controller prints the native signed 16-bit register values at 10 Hz on the
+ESP-IDF serial console. Each `RAW` line contains MPU6050 accelerometer XYZ,
+MPU6050 gyroscope XYZ, and QMC5883P magnetometer XYZ:
+
+```text
+I (...) vrcontroller: RAW accel=[120,-64,4070] gyro=[3,-7,1] mag=[812,-245,1330] mag_seen=1
+```
+
+`mag_seen=0` means that no fresh magnetometer sample has been received since
+startup, so the displayed magnetometer values are still zero. Change
+`TRACKER_RAW_SERIAL_RATE_HZ` in `main/tracker_config.h` to adjust the output
+rate, then use `idf.py monitor` to view it.
+
 ## Calibration
 
 Calibration is controlled wirelessly through the `vrrecv` receiver; the

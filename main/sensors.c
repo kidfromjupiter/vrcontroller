@@ -168,13 +168,13 @@ esp_err_t sensors_read_mpu(sensors_t *sensors, mpu6050_sample_t *sample)
     uint8_t data[14];
     ESP_RETURN_ON_ERROR(read_regs(sensors->mpu6050, MPU6050_REG_DATA, data,
                                   sizeof(data)), TAG, "MPU6050 read failed");
-    sample->accel_g[0] = be16(&data[0]) / 4096.0f;
-    sample->accel_g[1] = be16(&data[2]) / 4096.0f;
-    sample->accel_g[2] = be16(&data[4]) / 4096.0f;
+    for (int i = 0; i < 3; ++i) {
+        sample->raw_accel[i] = be16(&data[i * 2]);
+        sample->accel_g[i] = sample->raw_accel[i] / 4096.0f;
+        sample->raw_gyro[i] = be16(&data[8 + i * 2]);
+        sample->gyro_dps[i] = sample->raw_gyro[i] / 16.4f;
+    }
     sample->temperature_c = be16(&data[6]) / 340.0f + 36.53f;
-    sample->gyro_dps[0] = be16(&data[8]) / 16.4f;
-    sample->gyro_dps[1] = be16(&data[10]) / 16.4f;
-    sample->gyro_dps[2] = be16(&data[12]) / 16.4f;
     return ESP_OK;
 }
 
@@ -194,8 +194,8 @@ esp_err_t sensors_read_mag(sensors_t *sensors, qmc5883p_sample_t *sample,
                                   sizeof(data)), TAG, "QMC5883P read failed");
     const float ut_per_lsb = 100.0f / QMC5883P_8G_LSB_PER_GAUSS;
     for (int i = 0; i < 3; ++i) {
-        int16_t raw = le16(&data[i * 2]);
-        sample->magnetic_ut[i] = raw * ut_per_lsb;
+        sample->raw_magnetic[i] = le16(&data[i * 2]);
+        sample->magnetic_ut[i] = sample->raw_magnetic[i] * ut_per_lsb;
     }
     return ESP_OK;
 }

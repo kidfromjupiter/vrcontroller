@@ -13,6 +13,9 @@
 #define TRACKER_MAG_MAX_UT         100.0f
 #define TRACKER_MAG_MAX_AGE_US 150000
 
+/* Raw sensor register counts printed to the serial console. */
+#define TRACKER_RAW_SERIAL_RATE_HZ 10
+
 /* ESP-NOW transport configuration. All peers must use the same channel. */
 #define TRACKER_ESPNOW_CHANNEL     1
 

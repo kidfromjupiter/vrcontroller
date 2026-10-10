@@ -52,6 +52,17 @@ static float vector_norm(const float v[3])
     return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 }
 
+static void log_raw_values(const mpu6050_sample_t *imu,
+                           const int16_t mag[3], bool mag_seen)
+{
+    ESP_LOGI(TAG,
+             "RAW accel=[%d,%d,%d] gyro=[%d,%d,%d] "
+             "mag=[%d,%d,%d] mag_seen=%d",
+             imu->raw_accel[0], imu->raw_accel[1], imu->raw_accel[2],
+             imu->raw_gyro[0], imu->raw_gyro[1], imu->raw_gyro[2],
+             mag[0], mag[1], mag[2], mag_seen);
+}
+
 static void espnow_send_cb(const esp_now_send_info_t *tx_info,
                            esp_now_send_status_t status)
 {
@@ -292,12 +303,31 @@ static bool wait_for_initial_calibration(sensors_t *sensors,
                                          tracker_calibration_t *calibration)
 {
     int64_t next_beacon = 0;
+    int64_t next_raw_serial_time = 0;
+    int16_t latest_raw_mag[3] = {0};
+    bool has_raw_mag = false;
     for (;;) {
         (void)xQueueReset(mag_command_queue);
         int64_t now = esp_timer_get_time();
         if (now >= next_beacon) {
             send_idle_status(0, false);
             next_beacon = now + 1000000;
+        }
+        if (now >= next_raw_serial_time) {
+            mpu6050_sample_t raw_imu;
+            qmc5883p_sample_t raw_mag;
+            bool mag_ready = false;
+            if (sensors_read_mpu(sensors, &raw_imu) == ESP_OK) {
+                if (sensors_read_mag(sensors, &raw_mag, &mag_ready) == ESP_OK &&
+                    mag_ready && !raw_mag.overflow) {
+                    memcpy(latest_raw_mag, raw_mag.raw_magnetic,
+                           sizeof(latest_raw_mag));
+                    has_raw_mag = true;
+                }
+                log_raw_values(&raw_imu, latest_raw_mag, has_raw_mag);
+            }
+            next_raw_serial_time = now +
+                1000000 / TRACKER_RAW_SERIAL_RATE_HZ;
         }
         tracker_calibration_command_t command;
         if (xQueueReceive(calibration_command_queue, &command,
@@ -342,10 +372,13 @@ void app_main(void)
         uint16_t packet_sequence = 0;
         int64_t previous_sample_time = esp_timer_get_time();
         int64_t next_log_time = previous_sample_time + 1000000;
+        int64_t next_raw_serial_time = previous_sample_time;
         TickType_t next_wake = xTaskGetTickCount();
         bool restart_fusion = false;
         int64_t next_mag_report = 0;
         mag_sample_t diagnostic_sample = {0};
+        int16_t latest_raw_mag[3] = {0};
+        bool has_raw_mag = false;
 
         while (!restart_fusion) {
             tracker_calibration_command_t command;
@@ -409,6 +442,9 @@ void app_main(void)
                 latest_mag_time = 0;
             } else if (mag_ready) {
                 ++mag_ready_samples;
+                memcpy(latest_raw_mag, raw_mag.raw_magnetic,
+                       sizeof(latest_raw_mag));
+                has_raw_mag = true;
                 last_raw_mag_norm = vector_norm(raw_mag.magnetic_ut);
                 float corrected_native[3];
                 calibration_apply_mag(&calibration, &raw_mag,
@@ -440,6 +476,12 @@ void app_main(void)
             float gyro_rad[3];
             for (int i = 0; i < 3; ++i) {
                 gyro_rad[i] = gyro_dps[i] * (float)M_PI / 180.0f;
+            }
+
+            if (sample_time >= next_raw_serial_time) {
+                log_raw_values(&raw_imu, latest_raw_mag, has_raw_mag);
+                next_raw_serial_time = sample_time +
+                    1000000 / TRACKER_RAW_SERIAL_RATE_HZ;
             }
 
             float accel_norm = vector_norm(accel);
