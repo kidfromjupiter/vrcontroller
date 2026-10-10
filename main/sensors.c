@@ -20,6 +20,7 @@
 #define MPU6050_REG_PWR_MGMT1      0x6B
 #define MPU6050_REG_WHO_AM_I       0x75
 #define MPU6050_WHO_AM_I           0x68
+#define MPU6050_WHO_AM_I_ALT           0x72
 
 #define QMC5883P_ADDR              0x2C
 #define QMC5883P_REG_CHIP_ID       0x00
@@ -101,7 +102,7 @@ esp_err_t sensors_init(sensors_t *sensors)
     uint8_t id = 0;
     ESP_RETURN_ON_ERROR(read_regs(sensors->mpu6050, MPU6050_REG_WHO_AM_I,
                                   &id, 1), TAG, "MPU6050 identity read failed");
-    if ((id & 0x7eU) != MPU6050_WHO_AM_I) {
+    if ((id & 0x7eU) != MPU6050_WHO_AM_I && (id & 0x7eU) != MPU6050_WHO_AM_I_ALT) {
         ESP_LOGE(TAG, "Unexpected MPU6050 WHO_AM_I 0x%02x", id);
         return ESP_ERR_NOT_FOUND;
     }

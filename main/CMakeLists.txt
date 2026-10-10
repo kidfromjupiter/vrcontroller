@@ -5,12 +5,11 @@ idf_component_register(
         "calibration.c"
         "madgwick.c"
         "tracker_protocol.c"
+        "magnetometer_protocol.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_driver_gpio
         esp_driver_i2c
-        esp_driver_uart
-        esp_hal_usb
         esp_event
         esp_netif
         esp_wifi

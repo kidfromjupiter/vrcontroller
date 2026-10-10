@@ -57,10 +57,56 @@ static void test_tracker_packet_invalid_and_saturated_values(void)
     assert(get_u16(&packet[22]) == 0);
 }
 
+static void test_calibration_protocol(void)
+{
+    tracker_calibration_command_t command = {
+        .action = TRACKER_CAL_ACTION_CONFIRM,
+        .expected_stage = TRACKER_CAL_STAGE_WAIT_POS_Y,
+        .request_id = 0x1234,
+    };
+    uint8_t command_packet[TRACKER_CALIBRATION_COMMAND_SIZE];
+    tracker_calibration_command_encode(command_packet, &command);
+    tracker_calibration_command_t decoded_command;
+    assert(tracker_calibration_command_decode(
+        command_packet, sizeof(command_packet), &decoded_command));
+    assert(decoded_command.action == command.action);
+    assert(decoded_command.expected_stage == command.expected_stage);
+    assert(decoded_command.request_id == command.request_id);
+    assert(!tracker_calibration_command_decode(
+        command_packet, sizeof(command_packet) - 1, &decoded_command));
+    command_packet[1] = 99;
+    assert(!tracker_calibration_command_decode(
+        command_packet, sizeof(command_packet), &decoded_command));
+
+    tracker_calibration_status_t status = {
+        .stage = TRACKER_CAL_STAGE_CAPTURE_MAG,
+        .result = TRACKER_CAL_RESULT_NONE,
+        .flags = TRACKER_CAL_STATUS_HAS_CALIBRATION |
+                 TRACKER_CAL_STATUS_CAN_FINISH,
+        .elapsed_seconds = 12,
+        .request_id = 0xabcd,
+        .sample_count = 777,
+    };
+    uint8_t status_packet[TRACKER_CALIBRATION_STATUS_SIZE];
+    tracker_calibration_status_encode(status_packet, &status);
+    tracker_calibration_status_t decoded_status;
+    assert(tracker_calibration_status_decode(
+        status_packet, sizeof(status_packet), &decoded_status));
+    assert(decoded_status.stage == status.stage);
+    assert(decoded_status.flags == status.flags);
+    assert(decoded_status.elapsed_seconds == 12);
+    assert(decoded_status.request_id == 0xabcd);
+    assert(decoded_status.sample_count == 777);
+    status_packet[2] = 255;
+    assert(!tracker_calibration_status_decode(
+        status_packet, sizeof(status_packet), &decoded_status));
+}
+
 int main(void)
 {
     test_tracker_packet();
     test_tracker_packet_invalid_and_saturated_values();
+    test_calibration_protocol();
 
     madgwick_t filter;
     madgwick_init(&filter, 0.05f);

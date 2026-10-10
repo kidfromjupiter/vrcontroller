@@ -5,7 +5,6 @@
 #define TRACKER_I2C_SCL_GPIO       9
 #define TRACKER_I2C_CLOCK_HZ       400000
 #define TRACKER_CALIBRATION_LED_GPIO 5
-#define TRACKER_MAG_CAL_BUTTON_GPIO  7
 
 /* Fusion configuration. */
 #define TRACKER_SAMPLE_RATE_HZ     100
