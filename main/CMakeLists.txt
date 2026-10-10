@@ -3,7 +3,6 @@ idf_component_register(
         "vrcontroller.c"
         "sensors.c"
         "calibration.c"
-        "calibration_math.c"
         "madgwick.c"
         "tracker_protocol.c"
         "magnetometer_protocol.c"

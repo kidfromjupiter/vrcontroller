@@ -7,7 +7,16 @@
 #include "sensors.h"
 #include "tracker_protocol.h"
 
-#include "calibration_math.h"
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t size;
+    float gyro_bias_dps[3];
+    float accel_bias_g[3];
+    float accel_scale[3];
+    float mag_bias_ut[3];
+    float mag_scale[3];
+} tracker_calibration_t;
 
 typedef enum {
     CALIBRATION_CONTROL_NONE = 0,
