@@ -25,8 +25,6 @@
 #define STATUS_SEND_TIMEOUT_MS 200U
 
 static const char *TAG = "vrcontroller";
-static const int8_t IMU_MAP[3] = TRACKER_IMU_AXIS_MAP;
-static const int8_t MAG_MAP[3] = TRACKER_MAG_AXIS_MAP;
 static const uint8_t recv_addr[ESP_NOW_ETH_ALEN] = {
     0x34, 0xb7, 0xda, 0xfb, 0x23, 0xf8
 };
@@ -44,6 +42,7 @@ static bool has_terminal_status;
 typedef struct {
     uint16_t request_id;
     bool has_previous_calibration;
+    bool has_previous_maps;
     tracker_calibration_status_t current;
 } remote_calibration_t;
 
@@ -120,20 +119,41 @@ static void remember_and_send_terminal(tracker_calibration_status_t status)
     send_calibration_status(&status);
 }
 
-static void send_idle_status(uint16_t request_id, bool has_calibration)
+static uint8_t calibration_flags(const tracker_calibration_t *calibration)
+{
+    return calibration == NULL ? 0 : TRACKER_CAL_STATUS_HAS_CALIBRATION |
+        ((calibration->flags & CALIBRATION_HAS_MAPS) ? TRACKER_CAL_STATUS_HAS_MAPS : 0);
+}
+
+static void send_map_report(uint16_t request_id, const tracker_calibration_t *calibration)
+{
+    if (calibration == NULL) return;
+    tracker_calibration_map_report_t report = {
+        .request_id = request_id, .flags = calibration_flags(calibration),
+    };
+    memcpy(report.imu_axis_map, calibration->imu_axis_map, sizeof(report.imu_axis_map));
+    memcpy(report.mag_axis_map, calibration->mag_axis_map, sizeof(report.mag_axis_map));
+    uint8_t packet[TRACKER_CALIBRATION_MAP_REPORT_SIZE];
+    tracker_calibration_map_report_encode(packet, &report);
+    (void)send_blocking(packet, sizeof(packet));
+}
+
+static void send_idle_status(uint16_t request_id, const tracker_calibration_t *calibration)
 {
     if (has_terminal_status && request_id != 0 &&
         request_id == last_terminal_status.request_id) {
         send_calibration_status(&last_terminal_status);
+        send_map_report(request_id, calibration);
         return;
     }
     tracker_calibration_status_t status = {
         .stage = TRACKER_CAL_STAGE_IDLE,
         .result = TRACKER_CAL_RESULT_NONE,
-        .flags = has_calibration ? TRACKER_CAL_STATUS_HAS_CALIBRATION : 0,
+        .flags = calibration_flags(calibration),
         .request_id = request_id,
     };
     send_calibration_status(&status);
+    send_map_report(request_id, calibration);
 }
 
 static void calibration_notify(void *context,
@@ -148,6 +168,7 @@ static void calibration_notify(void *context,
     remote->current.flags = remote->has_previous_calibration
         ? TRACKER_CAL_STATUS_HAS_CALIBRATION
         : 0;
+    if (remote->has_previous_maps) remote->current.flags |= TRACKER_CAL_STATUS_HAS_MAPS;
     if (can_finish) remote->current.flags |= TRACKER_CAL_STATUS_CAN_FINISH;
     remote->current.elapsed_seconds = elapsed_seconds;
     remote->current.sample_count = sample_count;
@@ -210,10 +231,11 @@ static bool run_remote_calibration(sensors_t *sensors,
     remote_calibration_t remote = {
         .request_id = request_id,
         .has_previous_calibration = had_calibration,
+        .has_previous_maps = had_calibration && (calibration->flags & CALIBRATION_HAS_MAPS),
         .current = {
             .stage = TRACKER_CAL_STAGE_WAIT_STILL,
             .result = TRACKER_CAL_RESULT_NONE,
-            .flags = had_calibration ? TRACKER_CAL_STATUS_HAS_CALIBRATION : 0,
+            .flags = calibration_flags(had_calibration ? calibration : NULL),
             .request_id = request_id,
         },
     };
@@ -230,13 +252,14 @@ static bool run_remote_calibration(sensors_t *sensors,
     tracker_calibration_status_t terminal = remote.current;
     terminal.elapsed_seconds = 0;
     terminal.sample_count = 0;
-    terminal.flags = had_calibration ? TRACKER_CAL_STATUS_HAS_CALIBRATION : 0;
+    terminal.flags = calibration_flags(had_calibration ? calibration : NULL);
     if (err == ESP_OK) {
         *calibration = candidate;
         terminal.stage = TRACKER_CAL_STAGE_COMPLETE;
         terminal.result = TRACKER_CAL_RESULT_OK;
-        terminal.flags = TRACKER_CAL_STATUS_HAS_CALIBRATION;
+        terminal.flags = calibration_flags(calibration);
         remember_and_send_terminal(terminal);
+        send_map_report(request_id, calibration);
         ESP_LOGI(TAG, "Remote calibration saved");
         return true;
     }
@@ -296,7 +319,7 @@ static bool wait_for_initial_calibration(sensors_t *sensors,
         (void)xQueueReset(mag_command_queue);
         int64_t now = esp_timer_get_time();
         if (now >= next_beacon) {
-            send_idle_status(0, false);
+            send_idle_status(0, NULL);
             next_beacon = now + 1000000;
         }
         tracker_calibration_command_t command;
@@ -305,7 +328,7 @@ static bool wait_for_initial_calibration(sensors_t *sensors,
             continue;
         }
         if (command.action == TRACKER_CAL_ACTION_QUERY) {
-            send_idle_status(command.request_id, false);
+            send_idle_status(command.request_id, NULL);
         } else if (command.action == TRACKER_CAL_ACTION_START_FULL) {
             if (run_remote_calibration(sensors, calibration, false,
                                        command.request_id)) {
@@ -352,8 +375,12 @@ void app_main(void)
             while (xQueueReceive(calibration_command_queue, &command, 0) ==
                    pdTRUE) {
                 if (command.action == TRACKER_CAL_ACTION_QUERY) {
-                    send_idle_status(command.request_id, true);
+                    send_idle_status(command.request_id, &calibration);
                 } else if (command.action == TRACKER_CAL_ACTION_START_FULL) {
+                    if (has_terminal_status && command.request_id == last_terminal_status.request_id) {
+                        send_idle_status(command.request_id, &calibration);
+                        continue;
+                    }
                     (void)finish_pending_send(
                         pdMS_TO_TICKS(STATUS_SEND_TIMEOUT_MS));
                     has_calibration = run_remote_calibration(
@@ -361,7 +388,7 @@ void app_main(void)
                     restart_fusion = true;
                     break;
                 } else {
-                    send_idle_status(command.request_id, true);
+                    send_idle_status(command.request_id, &calibration);
                 }
             }
             if (restart_fusion) break;
@@ -413,7 +440,7 @@ void app_main(void)
                 float corrected_native[3];
                 calibration_apply_mag(&calibration, &raw_mag,
                                       corrected_native);
-                sensors_apply_axis_map(corrected_native, MAG_MAP, latest_mag);
+                sensors_apply_axis_map(corrected_native, calibration.mag_axis_map, latest_mag);
                 float mag_norm = vector_norm(latest_mag);
                 last_mag_norm = mag_norm;
                 diagnostic_sample.flags = MAG_FLAG_CALIBRATED | MAG_FLAG_FRESH;
@@ -435,8 +462,8 @@ void app_main(void)
             float accel_native[3], gyro_native_dps[3], accel[3], gyro_dps[3];
             calibration_apply_mpu(&calibration, &raw_imu, accel_native,
                                   gyro_native_dps);
-            sensors_apply_axis_map(accel_native, IMU_MAP, accel);
-            sensors_apply_axis_map(gyro_native_dps, IMU_MAP, gyro_dps);
+            sensors_apply_axis_map(accel_native, calibration.imu_axis_map, accel);
+            sensors_apply_axis_map(gyro_native_dps, calibration.imu_axis_map, gyro_dps);
             float gyro_rad[3];
             for (int i = 0; i < 3; ++i) {
                 gyro_rad[i] = gyro_dps[i] * (float)M_PI / 180.0f;
